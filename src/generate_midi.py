@@ -1,47 +1,68 @@
-import numpy as np
+import os
 import mido
+import numpy as np
+from mido import Message, MidiFile, MidiTrack
+import pretty_midi
 from tensorflow.keras.models import load_model
 
-# Cargar el modelo entrenado
-model = load_model('model/model.h5')
-
 # Cargar los datos preprocesados
+notes_int = np.load('notes_int.npy', allow_pickle=True)
+durations_int = np.load('durations_int.npy', allow_pickle=True)
 note_to_int = np.load('note_to_int.npy', allow_pickle=True).item()
+duration_to_int = np.load('duration_to_int.npy', allow_pickle=True).item()
 notes_set = np.load('notes_set.npy', allow_pickle=True)
-int_to_note = {i: note for note, i in note_to_int.items()}
+durations_set = np.load('durations_set.npy', allow_pickle=True)
+tempos = np.load('tempos.npy', allow_pickle=True)
 
-# Función para generar nuevas notas
-def generate_notes(model, start_sequence, note_to_int, int_to_note, length=500):
-    prediction = list(start_sequence)
+# Cargar el modelo entrenado
+model = load_model('model/model_final.h5')
+
+# Invertir los diccionarios de mapeo para reconstrucción
+int_to_note = {number: note for note, number in note_to_int.items()}
+int_to_duration = {number: duration for duration, number in duration_to_int.items()}
+
+def generate_midi(start_sequence, length=100, tempo=None):
+    generated_notes = start_sequence[:]
+    generated_durations = [0.5] * len(start_sequence)  # Duraciones por defecto
+    
     for _ in range(length):
-        # Convertir la secuencia actual a un formato adecuado
-        prediction_input = np.array(prediction)
-        prediction_input = prediction_input.reshape((1, len(prediction), 1))
-        prediction_input = prediction_input / float(len(note_to_int))
+        input_sequence = np.array(generated_notes[-100:]).reshape(1, 100, 1) / float(len(notes_set))
+        prediction = model.predict([input_sequence, input_sequence, input_sequence], verbose=0)  # Usar entradas correspondientes
+        predicted_note = np.argmax(prediction[0])  # Primera salida es notas
+        predicted_duration = np.argmax(prediction[1])  # Segunda salida es duraciones
+        predicted_tempo = np.argmax(prediction[2])  # Tercera salida es tempo
+        
+        generated_notes.append(predicted_note)
+        generated_durations.append(predicted_duration)
 
-        # Predecir la siguiente nota
-        predicted_note = model.predict(prediction_input)
-        index = np.argmax(predicted_note)
-        prediction.append(index)
+        # Puedes agregar un ajuste para cambiar el tempo si es necesario
+        if tempo is None:
+            tempo = predicted_tempo  # Si no se pasa tempo, usar el predicho
+            
+    # Crear un archivo MIDI con las notas generadas
+    midi = MidiFile()
+    track = MidiTrack()
+    midi.tracks.append(track)
+    
+    # Definir el tempo si no se especifica
+    if tempo is None:
+        tempo = np.median(tempos)  # Usar la mediana de los tempos si no se pasa
+    microseconds_per_beat = mido.bpm2tempo(tempo)
+    track.append(mido.MetaMessage('set_tempo', tempo=microseconds_per_beat))
+    
+    # Escribir las notas y duraciones en el archivo MIDI
+    for note_int, duration in zip(generated_notes, generated_durations):
+        note = int_to_note.get(note_int, 60)  # Nota por defecto: C4
+        duration_ticks = int(midi.ticks_per_beat * duration)
+        
+        # Añadir las notas al track
+        track.append(Message('note_on', note=note, velocity=64, time=0))
+        track.append(Message('note_off', note=note, velocity=64, time=duration_ticks))
+    
+    # Guardar el archivo MIDI generado
+    output_path = 'generated_music.mid'
+    midi.save(output_path)
+    print(f"Archivo MIDI generado y guardado en {output_path}")
 
-    # Convertir las notas predichas de nuevo a notas MIDI
-    predicted_notes = [int_to_note[i] for i in prediction]
-    return predicted_notes
-
-# Función para crear un archivo MIDI
-def create_midi(predicted_notes, output_file='generated_song.mid'):
-    mid = mido.MidiFile()
-    track = mido.MidiTrack()
-    mid.tracks.append(track)
-
-    for note in predicted_notes:
-        track.append(mido.Message('note_on', note=note, velocity=64, time=500))  # Ajusta el tiempo según sea necesario
-        track.append(mido.Message('note_off', note=note, velocity=64, time=500))
-
-    mid.save(output_file)
-    print(f"Archivo MIDI generado: {output_file}")
-
-# Generar notas y guardar en un archivo MIDI
-start_sequence = [note_to_int[note] for note in ['C4', 'E4', 'G4']]  # Semilla inicial (ajusta según quieras)
-predicted_notes = generate_notes(model, start_sequence, note_to_int, int_to_note, length=500)
-create_midi(predicted_notes, 'generated/generated_song.mid')
+# Ejemplo de uso
+generate_midi(start_sequence=notes_int[:100], length=200, tempo=120)

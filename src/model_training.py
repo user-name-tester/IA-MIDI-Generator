@@ -1,62 +1,103 @@
 import numpy as np
-from tensorflow.keras import utils as np_utils
-from tensorflow.keras.models import Sequential, load_model
-from tensorflow.keras.layers import LSTM, Dense, Dropout
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import ModelCheckpoint  # Importar el callback
+import tensorflow as tf
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
+from tensorflow.keras.callbacks import ModelCheckpoint
+import os
 
-# Cargar datos preprocesados
+# Cargar los datos preprocesados (notas, duraciones, tempo)
 notes_int = np.load('notes_int.npy', allow_pickle=True)
-note_to_int = np.load('note_to_int.npy', allow_pickle=True).item()
-notes_set = np.load('notes_set.npy', allow_pickle=True)
+durations_int = np.load('durations_int.npy', allow_pickle=True)
+tempo = np.load('tempos.npy', allow_pickle=True)
 
-# Crear secuencias de entrada para la red neuronal (ventanas de notas)
-sequence_length = 100
-X, y = [], []
+note_to_int = np.load('note_to_int.npy', allow_pickle=True).item()
+duration_to_int = np.load('duration_to_int.npy', allow_pickle=True).item()
+notes_set = np.load('notes_set.npy', allow_pickle=True)
+durations_set = np.load('durations_set.npy', allow_pickle=True)
+
+# Imprimir la longitud de notas
+print(f"Longitud de notes_int: {len(notes_int)}")
+print(f"Longitud de durations_int: {len(durations_int)}")
+print(f"Longitud de tempo: {len(tempo)}")
+
+# Generar secuencias de entrada (X) y salida (y)
+sequence_length = 100  # Tamaño de la secuencia de entrada
+
+X_notes = []
+y_notes = []
+X_durations = []
+y_durations = []
+X_tempos = []  # Solo guardaremos un tempo por secuencia
+y_tempos = []  # Salida también debe ser 1 valor de tempo
 
 for i in range(len(notes_int) - sequence_length):
-    X.append(notes_int[i:i+sequence_length])
-    y.append(notes_int[i+sequence_length])
+    if i + sequence_length < len(durations_int):
+        seq_in_notes = notes_int[i:i+sequence_length]
+        seq_out_notes = notes_int[i+sequence_length]
+        X_notes.append(seq_in_notes)
+        y_notes.append(seq_out_notes)
 
-X = np.array(X)
-y = np.array(y)
-y = np_utils.to_categorical(y, num_classes=len(notes_set))  # One-hot encode the target variable
+        seq_in_durations = durations_int[i:i+sequence_length]
+        seq_out_durations = durations_int[i+sequence_length]
+        X_durations.append(seq_in_durations)
+        y_durations.append(seq_out_durations)
+
+        # Asegurar que tempo se usa correctamente
+        tempo_value = tempo[i // (len(notes_int) // len(tempo))]  # Ajustar el índice de tempo
+        X_tempos.append(tempo_value)
+        y_tempos.append(tempo_value)
+
+# Convertir a arrays de numpy
+X_notes = np.reshape(X_notes, (len(X_notes), sequence_length, 1)) / float(len(notes_set))
+X_durations = np.reshape(X_durations, (len(X_durations), sequence_length, 1)) / float(len(durations_set))
+X_tempos = np.array(X_tempos).reshape(-1, 1) / float(max(tempo))
+
+y_notes = tf.keras.utils.to_categorical(y_notes, num_classes=len(notes_set))
+y_durations = tf.keras.utils.to_categorical(y_durations, num_classes=len(durations_set))
+y_tempos = np.array(y_tempos).reshape(-1, 1)  # Mantener la estructura correcta
 
 
-# Reshape de X para que sea (samples, time steps, features)
-X = X.reshape((X.shape[0], X.shape[1], 1))
+# Definir el modelo
+input_notes = Input(shape=(X_notes.shape[1], X_notes.shape[2]))
+input_durations = Input(shape=(X_durations.shape[1], X_durations.shape[2]))
+input_tempos = Input(shape=(1,))  # Un solo valor por muestra
 
-# Normalizar las notas a una escala de 0 a 1
-X = X / float(len(notes_set))
-y = np.expand_dims(y, axis=-1)
+x_notes = LSTM(512, return_sequences=True)(input_notes)
+x_notes = Dropout(0.3)(x_notes)
+x_notes = LSTM(512)(x_notes)
+x_notes = Dropout(0.3)(x_notes)
 
-# Cargar el modelo preentrenado si existe
-try:
-    # Aquí buscamos el último modelo guardado basado en los checkpoints
-    model = load_model('model/model_checkpoint_epoch_latest.h5')
-    print("Modelo cargado desde el último checkpoint.")
-except:
-    # Si no existe el modelo, crear uno nuevo
-    print("No se encontró un modelo guardado. Creando uno nuevo.")
-    model = Sequential()
-    model.add(LSTM(512, input_shape=(X.shape[1], X.shape[2]), return_sequences=True))
-    model.add(Dropout(0.3))
-    model.add(LSTM(512))
-    model.add(Dropout(0.3))
-    model.add(Dense(len(notes_set), activation='softmax'))  # Salida con tamaño igual al número de notas únicas
+x_durations = LSTM(512, return_sequences=True)(input_durations)
+x_durations = Dropout(0.3)(x_durations)
+x_durations = LSTM(512)(x_durations)
+x_durations = Dropout(0.3)(x_durations)
 
-    # Compilar el modelo
-    model.compile(loss='categorical_crossentropy', optimizer=Adam(learning_rate=0.001))
+x_tempos = Dense(128, activation="relu")(input_tempos)
+x_tempos = Dropout(0.3)(x_tempos)
 
-# Crear el callback para guardar el modelo en cada época
-checkpoint_callback = ModelCheckpoint('model/model_checkpoint_epoch_{epoch}.h5', 
-                                      save_best_only=False, 
-                                      save_weights_only=False, 
-                                      verbose=1)
+# Fusionar las salidas
+merged = tf.keras.layers.concatenate([x_notes, x_durations, x_tempos])
 
-# Entrenar el modelo con el callback, comenzando desde la última época si el modelo fue cargado
-model.fit(X, y, epochs=100, batch_size=64, callbacks=[checkpoint_callback])
+output_notes = Dense(len(notes_set), activation='softmax')(merged)
+output_durations = Dense(len(durations_set), activation='softmax')(merged)
+output_tempos = Dense(1, activation='linear')(merged)  # Predicción numérica continua
 
-# Al final del entrenamiento, guardar el modelo final
-model.save('model/model_final.h5')
-print("Entrenamiento completo y modelo guardado.")
+model = Model(inputs=[input_notes, input_durations, input_tempos],
+              outputs=[output_notes, output_durations, output_tempos])
+
+# Compilar el modelo
+model.compile(loss=['categorical_crossentropy', 'categorical_crossentropy', 'mse'],  # MSE para tempo
+              optimizer='adam')
+
+# Definir el callback para guardar el modelo
+checkpoint = ModelCheckpoint('model_checkpoint_epoch_latest.h5', save_best_only=True)
+
+# Entrenar el modelo
+model.fit([X_notes, X_durations, X_tempos], [y_notes, y_durations, y_tempos],
+          epochs=50, batch_size=64, callbacks=[checkpoint])
+
+# Crear carpeta "model" si no existe
+os.makedirs('model', exist_ok=True)
+
+# Guardar el modelo después de entrenar
+model.save('model/model_checkpoint_epoch_latest.h5')
