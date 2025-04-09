@@ -8,7 +8,7 @@ A IA that can generate MIDI files from other MIDI samples. This is a very early 
 
 The data_preprocessing.py extracts notes, notes durations, and bpm of the .mid file. And create .pkl files with that information, so the neural network can be trained.
 
-Sorry my english.
+Sorry my english. This is made with help of Grok, ChatGPT and BlackBox.
 
 This project is under license:
   
